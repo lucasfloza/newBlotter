@@ -78,6 +78,10 @@ export const terminalStatuses = new Set([
 export const PENDING_ACCEPTANCE = "Pendente aceite";
 export const UNASSIGNED_TRADER = "Sem trader";
 export const WORKFLOW_VERSION = "2";
+export const desks = ["BOV", "BMF"] as const;
+export function deskForAsset(symbol: string): (typeof desks)[number] {
+  return /^(WIN|WDO|IND|DOL|DI1)/.test(symbol.toUpperCase()) ? "BMF" : "BOV";
+}
 export function mockOrder(
   i: number,
   id = `row:order:${String(i).padStart(8, "0")}`,
@@ -85,19 +89,14 @@ export function mockOrder(
   const quantity = ((i % 50) + 1) * 100;
   const price = (12 + (i % 800) / 10).toFixed(2);
   const time = new Date(Date.UTC(2026, 9, 8, 12) + i * 1000).toISOString();
+  const symbol = [
+    "PETR4", "VALE3", "ITUB4", "BBDC4", "ABEV3", "WEGE3", "BOVA11", "BBAS3",
+    "WINV26", "WDOV26",
+  ][i % 10];
   const order = makeRow(id, {
     c01: `ORD-${String(i + 1).padStart(6, "0")}`,
     c02: time,
-    c03: [
-      "PETR4",
-      "VALE3",
-      "ITUB4",
-      "BBDC4",
-      "ABEV3",
-      "WEGE3",
-      "BOVA11",
-      "BBAS3",
-    ][i % 8],
+    c03: symbol,
     c04: i % 2 ? "Venda" : "Compra",
     c05: PENDING_ACCEPTANCE,
     c06: String(quantity),
@@ -107,7 +106,7 @@ export function mockOrder(
     c10: UNASSIGNED_TRADER,
     c11: `Cliente ${String((i % 200) + 1).padStart(3, "0")}`,
     c12: String(10000 + (i % 200)),
-    c13: ["Institucional", "Varejo", "Proprietaria"][i % 3],
+    c13: deskForAsset(symbol),
     c14: "B3",
     c15: "Limite",
     c16: "DAY",

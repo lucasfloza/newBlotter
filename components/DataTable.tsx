@@ -1,7 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { columns, mockOrder, type Row } from "@/lib/model";
-import { PAGE_SIZE } from "@/lib/query";
 import { useBlotter } from "@/lib/useBlotter";
 import {
   exportOrders,
@@ -15,6 +14,8 @@ import {
 import OrderDialog, { actionNames } from "./OrderDialog";
 import * as S from "./blotter.styles";
 import TableRow from "./TableRow";
+import { useVirtualOrders } from "@/lib/useVirtualOrders";
+import { useDragSelection } from "@/lib/useDragSelection";
 
 export default function DataTable() {
   const {
@@ -31,6 +32,9 @@ export default function DataTable() {
     requestId,
     queryMs,
     seedCount,
+    loadMore,
+    loadingMore,
+    refresh,
   } = useBlotter();
   const [selected, setSelected] = useState<Map<string, string>>(new Map());
   const selectedRef = useRef(selected);
@@ -55,8 +59,19 @@ export default function DataTable() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const disabled = !ready || busy || working;
-  const pageSelected =
+  const loadedSelected =
     result.rows.length > 0 && result.rows.every((row) => selected.has(row._id));
+
+  const virtual = useVirtualOrders(result.rows.length, query);
+  const drag = useDragSelection({ rowsRef: visibleRef, selectionRef: selectedRef, setSelected,
+    viewportRef: virtual.viewportRef, bodyOffsetRef: virtual.bodyOffsetRef, headerHeightRef: virtual.headerHeightRef,
+    anchorRef: anchor, disabled, resetKey: query });
+  // Prefetch near the end of the loaded window. The hook serializes calls and
+  // appends only a single cursor batch; the rendered rows remain bounded.
+  useEffect(() => {
+    if (!busy && !working && !loadingMore && !queryError && result.hasNext
+      && result.rows.length > 0 && virtual.range.end >= result.rows.length - 8) void loadMore();
+  }, [busy, working, loadingMore, queryError, result.hasNext, result.rows.length, virtual.range.end, loadMore]);
 
   const onSelect = useCallback((row: Row, multi: boolean, range: boolean) => {
     setSelected((previous) => {
@@ -108,8 +123,14 @@ export default function DataTable() {
         action,
         options,
       );
-      setSelected(new Map());
-      setQuery((q) => ({ ...q, cursors: [null], revision: q.revision + 1 }));
+      // Preserve the selection and replace only revisions confirmed by PouchDB.
+      // Failed/stale orders keep their old revision and require reselection.
+      setSelected(previous => {
+        const next = new Map(previous);
+        for (const { id, rev } of outcome.updated) if (next.has(id)) next.set(id, rev);
+        return next;
+      });
+      refresh();
       if (!outcome.succeeded && outcome.failures.length)
         throw new Error(outcome.failures.slice(0, 5).join("\n"));
       setNotice(
@@ -199,7 +220,7 @@ export default function DataTable() {
   }
 
   // Consulta somente os IDs selecionados, inclusive quando a seleção atravessa
-  // páginas. Habilita a interseção das ações válidas; revisões antigas bloqueiam.
+  // lotes. Habilita a interseção das ações válidas; revisões antigas bloqueiam.
   useEffect(() => {
     if (!menu || !dbRef.current) return;
     let cancelled = false;
@@ -256,9 +277,9 @@ export default function DataTable() {
           <strong>{seedCount.toLocaleString("pt-BR")} / 5.000</strong>
         </div>
         <div>
-          <span>Linhas nesta página</span>
+          <span>Ordens carregadas · renderização virtualizada</span>
           <strong>
-            {result.rows.length} / {PAGE_SIZE}
+            {result.rows.length}
           </strong>
         </div>
         <div>
@@ -291,11 +312,13 @@ export default function DataTable() {
           )}
         </S.Message>
       )}
-      <S.Grid aria-busy={busy || working}>
-        <table>
+      <S.Grid aria-busy={busy || working} data-loaded-count={result.rows.length}>
+        <S.Viewport ref={virtual.viewportRef} $dragging={drag.dragging} role="region" aria-label="Ordens com rolagem infinita" tabIndex={0}>
+        <table ref={virtual.tableRef} aria-rowcount={result.hasNext ? -1 : result.rows.length + 1}>
+          <colgroup>{columns.map((c, i) => <col key={c.id} style={{ width: i === 0 ? 180 : 145 }} />)}</colgroup>
           <caption>
             20 colunas · 10 filtros · Ctrl/Cmd para seleção múltipla · Shift
-            para intervalo · botão direito para ações · duplo clique para editar
+            para intervalo · clique e arraste para selecionar · botão direito para ações · duplo clique para editar
           </caption>
           <thead>
             <tr>
@@ -317,7 +340,6 @@ export default function DataTable() {
                       ++requestId.current;
                       setQuery((q) => ({
                         ...q,
-                        cursors: [null],
                         sort: {
                           column: c.id,
                           direction:
@@ -341,14 +363,14 @@ export default function DataTable() {
                     <label>
                       <input
                         type="checkbox"
-                        aria-label="Selecionar página atual"
-                        checked={pageSelected}
+                        aria-label="Selecionar ordens carregadas"
+                        checked={loadedSelected}
                         disabled={disabled}
                         onChange={() =>
                           setSelected((previous) => {
                             const next = new Map(previous);
                             result.rows.forEach((r) =>
-                              pageSelected
+                              loadedSelected
                                 ? next.delete(r._id)
                                 : next.set(r._id, r._rev!),
                             );
@@ -356,7 +378,7 @@ export default function DataTable() {
                           })
                         }
                       />
-                      Página
+                      Carregadas
                     </label>
                   )}
                   {c.filterable && (
@@ -377,16 +399,22 @@ export default function DataTable() {
             </tr>
           </thead>
           <tbody>
-            {result.rows.map((row) => (
+            {virtual.range.top > 0 && <S.Spacer $height={virtual.range.top} aria-hidden="true"><td colSpan={20} /></S.Spacer>}
+            {result.rows.slice(virtual.range.start, virtual.range.end).map((row, index) => (
               <TableRow
                 key={`${row._id}:${row._rev}`}
                 row={row}
                 selected={selected.has(row._id)}
+                disabled={disabled}
                 onSelect={onSelect}
                 onContext={onContext}
                 onEdit={onEdit}
+                onDragStart={drag.start}
+                suppressClick={drag.suppressClick}
+                rowIndex={virtual.range.start + index}
               />
             ))}
+            {virtual.range.bottom > 0 && <S.Spacer $height={virtual.range.bottom} aria-hidden="true"><td colSpan={20} /></S.Spacer>}
             {!result.rows.length && (
               <tr>
                 <td colSpan={20}>
@@ -396,36 +424,12 @@ export default function DataTable() {
             )}
           </tbody>
         </table>
+        </S.Viewport>
       </S.Grid>
       <S.Footer>
-        <S.Button
-          disabled={disabled || query.cursors.length === 1}
-          onClick={() =>
-            setQuery((q) => ({ ...q, cursors: q.cursors.slice(0, -1) }))
-          }
-        >
-          Anterior
-        </S.Button>
-        <span aria-live="polite">
-          Página {query.cursors.length}
-          {busy && " · Consultando…"}
-          {working && " · Gravando…"}
-        </span>
-        <S.Button
-          disabled={disabled || !!queryError || !result.hasNext}
-          onClick={() =>
-            setQuery((q) => ({
-              ...q,
-              cursors: [...q.cursors, result.nextCursor],
-            }))
-          }
-        >
-          Próxima
-        </S.Button>
-        <span>
-          Seleção persiste entre páginas. Mudanças realtime reiniciam a
-          paginação; revisões antigas precisam ser selecionadas novamente.
-        </span>
+        <span aria-live="polite">{result.rows.length} ordens carregadas{busy ? ' · Consultando…' : loadingMore ? ' · Carregando mais…' : result.hasNext ? ' · Role para carregar mais' : ' · Fim da lista'}{working && ' · Gravando…'}</span>
+        <span>A seleção persiste na rolagem e após ações. Alterações de outro usuário exigem selecionar a revisão atual.</span>
+        {queryError && ready && <S.Button onClick={refresh}>Tentar novamente</S.Button>}
       </S.Footer>
       {menu && (
         <S.Menu

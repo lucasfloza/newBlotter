@@ -1,4 +1,4 @@
-import { columns, makeRow, terminalStatuses, traders, PENDING_ACCEPTANCE, UNASSIGNED_TRADER, WORKFLOW_VERSION, type Row } from './model';
+import { columns, desks, makeRow, terminalStatuses, traders, PENDING_ACCEPTANCE, UNASSIGNED_TRADER, WORKFLOW_VERSION, type Row } from './model';
 import type { LocalDB } from './query';
 export type OrderAction = 'accept' | 'reject' | 'assign' | 'execute' | 'cancel' | 'edit';
 export type ActionOptions = { trader?: string; quantity?: number; price?: number; patch?: Record<string, string>; reason?: string };
@@ -61,12 +61,13 @@ export function applyAction(row: Row, action: OrderAction, options: ActionOption
   } else {
     // Edição é restrita aos campos de negócio; estado e fills só mudam via ações.
     if (options.patch?.c10 !== undefined && options.patch.c10 !== UNASSIGNED_TRADER) throw new Error('Atribua um trader pela ação Encaminhar após aceitar');
-    for (const key of ['c03', 'c04', 'c06', 'c07', 'c11', 'c19']) {
+    for (const key of ['c03', 'c04', 'c06', 'c07', 'c11', 'c13', 'c19']) {
       if (options.patch?.[key] !== undefined) values[key] = options.patch[key];
     }
     const executed = Number(values.c08);
     if (!/^[A-Z0-9]{3,12}$/.test(values.c03)) throw new Error('Ativo inválido');
     if (!['Compra', 'Venda'].includes(values.c04)) throw new Error('Lado inválido');
+    if (!desks.some(desk => desk === values.c13)) throw new Error('Mesa deve ser BOV ou BMF');
     values.c10 = UNASSIGNED_TRADER;
     if (!values.c11.trim()) throw new Error('Informe o cliente');
     const quantity = positive(values.c06, 'Quantidade', true);
@@ -90,6 +91,7 @@ export function applyAction(row: Row, action: OrderAction, options: ActionOption
 export async function runOrderAction(db: LocalDB, selection: Selection, action: OrderAction, options: ActionOptions = {}) {
   let succeeded = 0;
   const failures: string[] = [];
+  const updated: Selection = [];
   // Não há transação em bulkDocs: inspecione cada resultado e informe êxito parcial.
   for (let offset = 0; offset < selection.length; offset += 100) {
     const targets = selection.slice(offset, offset + 100);
@@ -104,10 +106,15 @@ export async function runOrderAction(db: LocalDB, selection: Selection, action: 
     });
     for (const item of await db.bulkDocs(updates)) {
       if ('error' in item) failures.push(`${item.id}: ${item.status === 409 ? 'Conflito de revisão' : item.message}`);
-      else succeeded++;
+      else if (typeof item.id === 'string' && item.id && typeof item.rev === 'string' && item.rev) {
+        succeeded++;
+        // A UI mantém a seleção usando a revisão confirmada pelo banco,
+        // permitindo encadear Encaminhar → Executar sem selecionar novamente.
+        updated.push({ id: item.id, rev: item.rev });
+      } else failures.push(`${item.id ?? 'Ordem'}: Banco não confirmou ID e revisão da gravação; atualize a seleção`);
     }
   }
-  return { succeeded, failures };
+  return { succeeded, failures, updated };
 }
 export async function exportOrders(db: LocalDB, selection: Selection) {
   const response = await db.allDocs({ keys: selection.map(s => s.id), include_docs: true });

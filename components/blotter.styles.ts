@@ -1,6 +1,7 @@
 'use client';
 import styled from 'styled-components';
-export const Page = styled.main`padding: 28px; max-width: 1920px; margin: auto; @media(max-width: 700px) { padding: 12px; }`;
+import { ORDER_ROW_HEIGHT, TABLE_WIDTH } from '@/lib/virtual-window';
+export const Page = styled.main`padding: 28px; max-width: 1920px; margin: auto; height: 100dvh; min-height: 640px; display: flex; flex-direction: column; @media(max-width: 700px) { padding: 12px; }`;
 export const Header = styled.header`
   display: flex; justify-content: space-between; gap: 20px; align-items: center;
   h1 { margin: 8px 0; font-size: 28px; letter-spacing: -.8px; }
@@ -22,19 +23,31 @@ export const Metrics = styled.div`
   @media(max-width:700px) { grid-template-columns: repeat(2, 1fr); }
 `;
 export const Grid = styled.div`
-  overflow: auto; max-height: 65vh; border: 1px solid #26354b; border-radius: 9px; background: #0f1928;
-  table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+  flex: 1; min-height: 160px; overflow-x: auto; overflow-y: hidden; border: 1px solid #26354b; border-radius: 9px; background: #0f1928;
+  table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 12px; }
   caption { text-align: left; padding: 12px; color: #91a4bf; }
   thead { position: sticky; top: 0; z-index: 2; background: #172337; }
   th { min-width: 145px; text-align: left; padding: 12px 10px; border-bottom: 1px solid #314057; vertical-align: top; }
   th:first-child { min-width: 180px; }
   th button { background: none; border: none; padding: 0; color: #c3d2e9; width: 100%; text-align: left; margin-bottom: 10px; display: flex; justify-content: space-between; }
   th input:not([type=checkbox]) { width: 100%; padding: 7px 8px; background: #0d1624; color: #dce5f3; border: 1px solid #314057; border-radius: 5px; font-weight: normal; }
-  td { white-space: nowrap; padding: 11px 10px; border-bottom: 1px solid #1e2a3c; font-variant-numeric: tabular-nums; }
+  td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 11px 10px; border-bottom: 1px solid #1e2a3c; font-variant-numeric: tabular-nums; }
   td:first-child { color: #93c5fd; font-weight: bold; }
   input[type=checkbox] { accent-color: #3b82f6; margin-right: 10px; }
 `;
+export const Viewport = styled.div<{ $dragging: boolean }>`
+  width: ${TABLE_WIDTH}px; min-width: 100%; height: 100%;
+  overflow-y: auto; overflow-x: hidden; scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+  cursor: ${p => p.$dragging ? 'crosshair' : 'default'};
+`;
+export const Spacer = styled.tr<{ $height: number }>`
+  height: ${p => p.$height}px;
+  td { height: ${p => p.$height}px; padding: 0; border: 0; }
+`;
 export const OrderRow = styled.tr<{ $selected: boolean }>`
+  height: ${ORDER_ROW_HEIGHT}px; user-select: none;
+  td { height: ${ORDER_ROW_HEIGHT}px; }
   background: ${p => p.$selected ? '#183555' : 'transparent'};
   &:hover { background: ${p => p.$selected ? '#204266' : '#152237'}; }
 `;

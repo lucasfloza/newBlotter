@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import PouchDB from 'pouchdb';
 import find from 'pouchdb-find';
-import { mockOrder, PENDING_ACCEPTANCE, UNASSIGNED_TRADER, type Row } from '../lib/model';
+import { desks, mockOrder, PENDING_ACCEPTANCE, UNASSIGNED_TRADER, type Row } from '../lib/model';
 import { seedDemo } from '../lib/database';
 import { ensureIndexes, fetchPage } from '../lib/query';
 import { applyAction, runOrderAction, exportOrders, canOrderAction, selectionActionAvailability } from '../lib/orders';
@@ -21,6 +21,9 @@ test('pendente editável → Nova imutável → trader → execução parcial/to
   assert.throws(() => applyAction(original, 'edit', {patch:{c10:'Ana Lima'}}), /Encaminhar/);
   const edited = applyAction(original, 'edit', {patch:{c06:'1e3'}});
   assert.equal(edited.c06,'1000'); assert.equal(edited.c10,UNASSIGNED_TRADER);
+  const newDesk = applyAction(original, 'edit', {patch:{c13:'BMF'}});
+  assert.equal(newDesk.c13, 'BMF'); assert.ok(newDesk.k13!.startsWith('bmf\u0000'));
+  assert.throws(() => applyAction(original, 'edit', {patch:{c13:'Institucional'}}), /Mesa deve ser BOV ou BMF/);
   const rejected = applyAction(original, 'reject', {reason:'Limite de risco'});
   assert.equal(rejected.c05,'Rejeitada');
   assert.throws(() => applyAction(rejected,'accept'),/finalizada/);
@@ -72,8 +75,13 @@ test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e ex
     await ensureIndexes(db);
     await seedDemo(db);
     const ids = Array.from({length:5000}, (_,i) => mockOrder(i)._id);
-    const seeded = await db.allDocs({keys: ids});
+    const seeded = await db.allDocs({keys: ids, include_docs:true});
     assert.equal(seeded.rows.filter(r => !('error' in r)).length, 5000);
+    const seededOrders = seeded.rows.flatMap(r => 'doc' in r && r.doc ? [r.doc] : []);
+    assert.deepEqual(new Set(seededOrders.map(row => row.c13)), new Set(desks));
+    assert.ok(seededOrders.every(row => row.c05 === PENDING_ACCEPTANCE && row.c10 === UNASSIGNED_TRADER));
+    assert.equal(seededOrders.find(row => row.c03 === 'WINV26')?.c13, 'BMF');
+    assert.equal(seededOrders.find(row => row.c03 === 'PETR4')?.c13, 'BOV');
     const row = await db.get(ids[0]), another = await db.get(ids[1]);
     const edited = applyAction(row, 'edit', {patch:{c06:'9', c07:'99.00', c19:'=HYPERLINK("evil")'}});
     await db.put(edited);
@@ -82,6 +90,8 @@ test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e ex
     const outcome = await runOrderAction(db, [{id:row._id,rev:row._rev!},{id:another._id,rev:another._rev!}], 'accept');
     assert.equal(outcome.succeeded, 1); assert.equal(outcome.failures.length, 1);
     assert.match(outcome.failures[0], /outro usuário/);
+    assert.deepEqual(outcome.updated, [{id:another._id,rev:(await db.get(another._id))._rev!}]);
+    assert.ok(!outcome.updated.some(target => target.id === row._id));
     await seedDemo(db);
     assert.equal((await db.get(ids[0])).c06, '9');
     assert.equal((await db.get(ids[1])).c05, 'Nova');
@@ -95,10 +105,43 @@ test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e ex
     const accepted = await db.get(ids[1]);
     const forwarded = await runOrderAction(db, [{id:accepted._id,rev:accepted._rev!}], 'assign', {trader:'Ana Lima'});
     assert.equal(forwarded.succeeded,1); assert.equal((await db.get(ids[1])).c10,'Ana Lima');
+    assert.deepEqual(forwarded.updated, [{id:accepted._id,rev:(await db.get(accepted._id))._rev!}]);
+    const executed = await runOrderAction(db, forwarded.updated, 'execute');
+    assert.equal(executed.succeeded,1); assert.equal((await db.get(ids[1])).c05,'Executada');
+    assert.deepEqual(executed.updated, [{id:accepted._id,rev:(await db.get(accepted._id))._rev!}]);
+    const blocked = await runOrderAction(db, [{id:fresh._id,rev:fresh._rev!}], 'assign', {trader:'Ana Lima'});
+    assert.equal(blocked.succeeded,0); assert.equal(blocked.failures.length,1); assert.deepEqual(blocked.updated,[]);
     const rejected = await db.get(ids[2]);
     assert.equal((await runOrderAction(db, [{id:rejected._id,rev:rejected._rev!}], 'reject', {reason:'Limite de risco'})).succeeded,1);
     assert.equal((await db.get(ids[2])).c05,'Rejeitada');
   } finally { await db.destroy(); await rm(dir,{recursive:true,force:true}); }
+});
+
+test('migração das mesas é independente do fluxo e preserva ordens e mesas válidas', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'desks-test-'));
+  const db = new PouchDB<Row>(path.join(dir, 'db'));
+  try {
+    await db.put({ _id:'_local/order-workflow-v2', kind:'row', completed:'true' });
+    const assigned = applyAction(applyAction(mockOrder(0), 'accept'), 'assign', {trader:'Ana Lima'});
+    const partial = applyAction(applyAction(applyAction(mockOrder(8), 'accept'), 'assign', {trader:'Bruno Costa'}), 'execute', {quantity:30});
+    const rejected = applyAction(mockOrder(1), 'reject', {reason:'Limite de risco'});
+    assigned.c13 = 'Institucional'; partial.c13 = 'Proprietaria'; rejected.c13 = 'Varejo';
+    assigned.c19 = 'Edição preservada'; assigned.externalReference = 'oms-42';
+    const valid = {...mockOrder(2), c13:'BMF', k13:`bmf\u0000${mockOrder(2)._id}`};
+    await db.bulkDocs([assigned, partial, rejected, valid]);
+    const before = await Promise.all([assigned, partial, rejected, valid].map(row => db.get(row._id)));
+    await migrateOrderWorkflow(db);
+    const after = await Promise.all(before.map(row => db.get(row._id)));
+    assert.deepEqual(after.map(row => row.c13), ['BOV','BMF','BOV','BMF']);
+    for (let i = 0; i < 3; i++) {
+      assert.deepEqual({...after[i], _rev:before[i]._rev, c13:before[i].c13, k13:before[i].k13}, before[i]);
+      assert.equal(after[i].k13, `${after[i].c13!.toLowerCase()}\u0000${after[i]._id}`);
+    }
+    assert.deepEqual(after[3], before[3]);
+    assert.equal((await db.get('_local/order-desks-v1')).completed, 'true');
+    await migrateOrderWorkflow(db);
+    assert.deepEqual(await Promise.all(after.map(row => db.get(row._id))), after);
+  } finally { await db.destroy(); await rm(dir, {recursive:true, force:true}); }
 });
 
 test('migração idempotente preserva edições, atribuições e execuções antigas', async () => {
