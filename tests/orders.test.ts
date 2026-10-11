@@ -5,30 +5,65 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import PouchDB from 'pouchdb';
 import find from 'pouchdb-find';
-import { mockOrder, type Row } from '../lib/model';
+import { mockOrder, PENDING_ACCEPTANCE, UNASSIGNED_TRADER, type Row } from '../lib/model';
 import { seedDemo } from '../lib/database';
 import { ensureIndexes, fetchPage } from '../lib/query';
-import { applyAction, runOrderAction, exportOrders } from '../lib/orders';
+import { applyAction, runOrderAction, exportOrders, canOrderAction, selectionActionAvailability } from '../lib/orders';
+import { migrateOrderWorkflow } from '../lib/workflow-migration';
 PouchDB.plugin(find);
-test('transições, fills, saldo, preço limite e campos imutáveis após execução', () => {
+test('pendente editável → Nova imutável → trader → execução parcial/total', () => {
   const original = mockOrder(0);
-  assert.throws(() => applyAction(original, 'execute'), /Aceite/);
-  const accepted = applyAction(original, 'accept');
-  const partial = applyAction(accepted, 'execute', {quantity:40, price:11});
-  assert.equal(partial.c05, 'Parcial'); assert.equal(partial.c08, '40');
-  assert.throws(() => applyAction(partial, 'reject', {reason:'teste'}), /execução/);
-  assert.throws(() => applyAction(partial, 'edit', {patch:{c03:'VALE3'}}), /bloqueados/);
-  assert.throws(() => applyAction(partial, 'execute', {quantity:61}), /saldo/);
-  assert.throws(() => applyAction(accepted, 'execute', {price:13}), /limite/);
-  assert.throws(() => applyAction(accepted, 'execute', {price:0.001}), /duas casas/);
+  assert.equal(original.c05, PENDING_ACCEPTANCE);
+  assert.equal(original.c10, UNASSIGNED_TRADER);
+  assert.equal(canOrderAction(original, 'edit'), true);
+  assert.throws(() => applyAction(original, 'execute'), /trader/);
+  assert.throws(() => applyAction(original, 'assign', {trader:'Ana Lima'}), /Nova/);
+  assert.throws(() => applyAction(original, 'edit', {patch:{c10:'Ana Lima'}}), /Encaminhar/);
   const edited = applyAction(original, 'edit', {patch:{c06:'1e3'}});
-  assert.equal(edited.c06,'1000');
+  assert.equal(edited.c06,'1000'); assert.equal(edited.c10,UNASSIGNED_TRADER);
+  const rejected = applyAction(original, 'reject', {reason:'Limite de risco'});
+  assert.equal(rejected.c05,'Rejeitada');
+  assert.throws(() => applyAction(rejected,'accept'),/finalizada/);
+  const accepted = applyAction(original, 'accept');
+  assert.equal(accepted.c05,'Nova'); assert.equal(accepted.c10,UNASSIGNED_TRADER);
+  for (const action of ['accept','reject','edit'] as const) assert.throws(() => applyAction(accepted,action),/Pendente aceite/);
+  assert.throws(() => applyAction(accepted, 'execute'), /trader/);
+  assert.throws(() => applyAction(accepted, 'assign',{trader:UNASSIGNED_TRADER}), /Selecione/);
+  const assigned = applyAction(accepted, 'assign', {trader:'Ana Lima'});
+  assert.equal(assigned.c05,'Nova'); assert.equal(assigned.c10,'Ana Lima');
+  assert.equal(canOrderAction(assigned,'execute'),true);
+  const partial = applyAction(assigned, 'execute', {quantity:40, price:11});
+  assert.equal(partial.c05, 'Parcial'); assert.equal(partial.c08, '40');
+  assert.equal(canOrderAction(partial,'assign'),false);
+  assert.throws(() => applyAction(partial, 'reject', {reason:'teste'}), /Pendente aceite/);
+  assert.throws(() => applyAction(partial, 'edit', {patch:{c03:'VALE3'}}), /Pendente aceite/);
+  assert.throws(() => applyAction(partial, 'execute', {quantity:61}), /saldo/);
+  assert.throws(() => applyAction(assigned, 'execute', {price:13}), /limite/);
+  assert.throws(() => applyAction(assigned, 'execute', {price:0.001}), /duas casas/);
   const executed = applyAction(partial, 'execute', {quantity:60, price:12});
   assert.equal(executed.c05, 'Executada'); assert.equal(executed.c09, '11.60');
   assert.throws(() => applyAction(executed, 'cancel'), /finalizada/);
   const cancelled = applyAction(partial, 'cancel'); assert.equal(cancelled.c08, '40');
-  const sell = applyAction(mockOrder(1), 'accept');
+  const sell = applyAction(applyAction(mockOrder(1), 'accept'), 'assign', {trader:'Ana Lima'});
   assert.throws(() => applyAction(sell, 'execute', {price:1}), /limite/);
+});
+test('habilitação de ações usa todas as ordens e revisões selecionadas', () => {
+  const pending = {...mockOrder(0),_rev:'1-a'};
+  const another = {...mockOrder(1),_rev:'1-b'};
+  const nova = {...applyAction(another,'accept'),_rev:'2-b'};
+  const assigned = {...applyAction(nova,'assign',{trader:'Ana Lima'}),_rev:'3-b'};
+  const target = (r:Row) => ({id:r._id,rev:r._rev!});
+  const available = selectionActionAvailability([pending],[target(pending)]);
+  assert.deepEqual(available,{accept:true,reject:true,assign:false,execute:false,cancel:false,edit:true});
+  const twoPending = selectionActionAvailability([pending,another],[target(pending),target(another)]);
+  assert.equal(twoPending.accept,true); assert.equal(twoPending.edit,false);
+  const mixed = selectionActionAvailability([pending,nova],[target(pending),target(nova)]);
+  assert.ok(Object.values(mixed).every(enabled => !enabled));
+  assert.equal(selectionActionAvailability([nova],[target(nova)]).execute,false);
+  assert.equal(selectionActionAvailability([assigned],[target(assigned)]).execute,true);
+  assert.ok(Object.values(selectionActionAvailability([assigned],[target(nova)])).every(enabled => !enabled));
+  assert.ok(Object.values(selectionActionAvailability([],[])).every(enabled => !enabled));
+  assert.ok(Object.values(selectionActionAvailability([],[target(pending)])).every(enabled => !enabled));
 });
 test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e exportação segura', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'orders-test-'));
@@ -49,7 +84,8 @@ test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e ex
     assert.match(outcome.failures[0], /outro usuário/);
     await seedDemo(db);
     assert.equal((await db.get(ids[0])).c06, '9');
-    assert.equal((await db.get(ids[1])).c05, 'Aceita');
+    assert.equal((await db.get(ids[1])).c05, 'Nova');
+    assert.equal((await db.get(ids[1])).c10, UNASSIGNED_TRADER);
     const quantity = await fetchPage(db, {}, {column:'c06',direction:'asc'}, null, 10);
     assert.equal(quantity.rows[0]._id, ids[0]); // 9 < 100, sem ordenação lexical.
     const exact = await fetchPage(db, {c06:'9'}, {column:'c06',direction:'asc'}, null);
@@ -62,5 +98,36 @@ test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e ex
     const rejected = await db.get(ids[2]);
     assert.equal((await runOrderAction(db, [{id:rejected._id,rev:rejected._rev!}], 'reject', {reason:'Limite de risco'})).succeeded,1);
     assert.equal((await db.get(ids[2])).c05,'Rejeitada');
+  } finally { await db.destroy(); await rm(dir,{recursive:true,force:true}); }
+});
+
+test('migração idempotente preserva edições, atribuições e execuções antigas', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'workflow-test-'));
+  const db = new PouchDB<Row>(path.join(dir,'db'));
+  try {
+    const legacy = (i:number, status:string, actions:string[] = []) => {
+      const doc=mockOrder(i); delete doc.workflowVersion;
+      doc.c05=status; doc.c10='Ana Lima';
+      doc.actionHistory=JSON.stringify(actions.map(action => ({action,at:doc.c18})));
+      return doc;
+    };
+    const untouched=legacy(0,'Nova'); untouched.c19='Edicao preservada';
+    const accepted=legacy(1,'Aceita',['accept']);
+    const assigned=legacy(2,'Encaminhada',['accept','assign']);
+    const partial=legacy(3,'Parcial',['accept','execute']); partial.c08='30';
+    const rejected=legacy(4,'Rejeitada',['reject']);
+    await db.bulkDocs([untouched,accepted,assigned,partial,rejected]);
+    await migrateOrderWorkflow(db);
+    const migrated=await db.get(untouched._id);
+    assert.equal(migrated.c05,PENDING_ACCEPTANCE); assert.equal(migrated.c10,UNASSIGNED_TRADER);
+    assert.equal(migrated.c19,'Edicao preservada'); assert.ok(migrated.k05!.startsWith('pendente aceite'));
+    const newAccepted=await db.get(accepted._id);
+    assert.equal(newAccepted.c05,'Nova'); assert.equal(newAccepted.c10,UNASSIGNED_TRADER);
+    const newAssigned=await db.get(assigned._id);
+    assert.equal(newAssigned.c05,'Nova'); assert.equal(newAssigned.c10,'Ana Lima');
+    assert.equal((await db.get(partial._id)).c08,'30'); assert.equal((await db.get(partial._id)).c05,'Parcial');
+    assert.equal((await db.get(rejected._id)).c05,'Rejeitada');
+    await migrateOrderWorkflow(db);
+    assert.equal((await db.get(untouched._id))._rev,migrated._rev);
   } finally { await db.destroy(); await rm(dir,{recursive:true,force:true}); }
 });

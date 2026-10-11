@@ -33,7 +33,7 @@ export default function OrderDialog({ action, row, count, onClose, onSubmit }: {
         const text = (name: string) => String(data.get(name) ?? '').trim();
         const options: ActionOptions = { reason: text('reason'), trader: text('trader') };
         if (action === 'execute') { if (text('quantity')) options.quantity = Number(text('quantity')); if (text('price')) options.price = Number(text('price')); }
-        if (action === 'edit') options.patch = Object.fromEntries(['c03','c04','c06','c07','c10','c11','c19'].filter(k => data.has(k)).map(k => [k, text(k)]));
+        if (action === 'edit') options.patch = Object.fromEntries(['c03','c04','c06','c07','c11','c19'].filter(k => data.has(k)).map(k => [k, text(k)]));
         setSaving(true); setError('');
         try { await onSubmit(options); }
         catch (e) { setError(e instanceof Error ? e.message : 'Falha ao salvar'); }
@@ -44,7 +44,6 @@ export default function OrderDialog({ action, row, count, onClose, onSubmit }: {
           <label>Lado<select name="c04" defaultValue={row?.c04} disabled={Number(row?.c08) > 0}><option>Compra</option><option>Venda</option></select></label>
           <label>Quantidade<input name="c06" type="number" min={Number(row?.c08) + 1} max="1000000000" step="1" defaultValue={row?.c06} required /></label>
           <label>Preço limite<input name="c07" type="number" min="0.01" step="0.01" max="1000000000" defaultValue={row?.c07} required disabled={Number(row?.c08) > 0} /></label>
-          <label>Trader<select name="c10" defaultValue={row?.c10}>{traders.map(t => <option key={t}>{t}</option>)}</select></label>
           <label>Cliente<input name="c11" defaultValue={row?.c11} required maxLength={100} /></label>
           <label>Observações<input name="c19" defaultValue={row?.c19} maxLength={500} /></label>
         </>}

@@ -27,10 +27,10 @@ Não execute build simultaneamente com um dev server que use o mesmo `.next`.
 
 - A tabela tem exatamente **20 colunas** de negócio, todas ordenáveis, e **10 filtros**. Texto usa prefixo sem diferenciar maiúsculas; números usam valor exato, com ponto decimal. Datas são filtradas pelo prefixo ISO, por exemplo `2026-10-08`.
 - Clique seleciona uma ordem. Ctrl/Cmd ou checkboxes adicionam/removem seleção. Shift seleciona um intervalo da página. O checkbox no cabeçalho seleciona a página atual, sem adicionar uma 21ª coluna.
-- A seleção persiste entre páginas. Botão direito em uma ordem já selecionada abre ações para toda a seleção; em uma ordem não selecionada, abre ações só para ela. Shift+F10 também abre o menu e as setas navegam pelas ações. A barra de ações oferece as mesmas operações.
-- Duplo clique ou **Editar** abre edição de ativo, lado, quantidade, preço limite, trader, cliente e observações. Chaves de busca, financeiro e data de atualização são recalculados ao gravar.
+- A seleção persiste entre páginas. Botão direito em uma ordem já selecionada abre ações para toda a seleção; em uma ordem não selecionada, abre ações só para ela. Shift+F10 também abre o menu e as setas navegam pelas ações. Ações em lote só ficam habilitadas quando todas as ordens selecionadas permitem a operação; revisões antigas bloqueiam as ações até selecionar novamente.
+- Toda ordem chega em **Pendente aceite**, **Sem trader**. Duplo clique ou **Editar** abre edição de ativo, lado, quantidade, preço limite, cliente e observações somente nesse estado. Chaves de busca, financeiro e data de atualização são recalculados ao gravar. Trader não pode ser atribuído pelo formulário de edição.
 - **Aceitar**, **rejeitar** com motivo, **encaminhar** para um trader, **executar** parcial/total, **cancelar** e **exportar CSV** funcionam para uma ou várias ordens.
-- Execução exige ordem aceita/parcial, respeita o saldo e o preço limite. O preço médio considera os fills anteriores. Cancelamento preserva execuções já realizadas. Ordens finalizadas não podem ser alteradas; após fill parcial, ativo/lado/preço ficam bloqueados.
+- **Aceitar** muda Pendente aceite para **Nova** e bloqueia a edição inteira. **Rejeitar** só é permitido enquanto Pendente aceite, mudando para Rejeitada. **Encaminhar** exige status Nova e atribui o trader sem mudar o status. **Executar** exige Nova/Parcial, trader atribuído e saldo; respeita quantidade e preço limite. Cancelar é permitido em Nova/Parcial e preserva fills. Executada/Rejeitada/Cancelada bloqueiam alterações, mas continuam exportáveis.
 - Na execução em lote, quantidade informada é aplicada a cada ordem; em branco usa o saldo de cada uma. Preço em branco usa o limite de cada ordem. Resultados de ações em lote podem ter sucesso parcial: cada documento é validado e cada retorno de `bulkDocs` é inspecionado.
 - **Simular chegada** insere uma nova ordem. O feed `changes` atualiza a tabela sem reload. O cartão de performance mede o tempo real da última consulta local, incluindo atualização do índice, não o tempo total de renderização.
 - CSV contém somente as ordens selecionadas, tem BOM UTF-8 e separador `;` para abrir em Excel/LibreOffice. Valores que poderiam ser interpretados como fórmulas são escapados. Não é um arquivo binário `.xlsx`.
@@ -43,7 +43,8 @@ Todas as ações/executions são **simulações locais**, replicáveis se CouchD
 - `lib/model.ts`: 20 colunas, ordens mockadas e chaves ordenáveis (números têm encoding numérico, não ordenação lexical).
 - `lib/query.ts`: índices persistentes e `fetchPage`/`buildQuery` com `db.find`.
 - `lib/useBlotter.ts`: preparação, debounce de 250 ms, feed local e descarte de respostas antigas.
-- `lib/orders.ts`: validações, edições, ações em lote, controle de revisão e exportação.
+- `lib/orders.ts`: política compartilhada entre menu e gravação, edições, ações em lote, controle de revisão e exportação.
+- `lib/workflow-migration.ts`: atualização idempotente de documentos do fluxo antigo, preservando edições, histórico, atribuições explícitas e fills. Antigas Nova sem aceite viram Pendente aceite/Sem trader; Aceita/Encaminhada viram Nova, preservando apenas atribuição explícita de trader. Documentos novos têm `workflowVersion: "2"`.
 - `components/DataTable.tsx`, `OrderDialog.tsx`: seleção, menu contextual, formulários e tabela.
 - `components/blotter.styles.ts`, `StyleRegistry.tsx`: estilos e integração SSR de styled-components.
 
@@ -69,4 +70,4 @@ O feed local `db.changes({ since: 'now', live: true, include_docs: true })` rece
 
 ## Verificação
 
-`npm test` usa PouchDB real/LevelDB: 40 ordenações, cursores com empates e exclusão de borda, filtros, feed, carga idempotente de 5.000 ordens, transições de estado, fills, validações, conflitos e CSV seguro. O teste de navegador da sessão usa Chromium/IndexedDB para validar seed automático, ações por menu, edição, seleção, paginação, download e persistência. A carga é feita em cada navegador novo, não na memória do servidor Next.js.
+`npm test` usa PouchDB real/LevelDB: 40 ordenações, cursores com empates e exclusão de borda, filtros, feed, carga idempotente de 5.000 ordens, transições de estado, habilitação por seleção/revisão, migração idempotente, fills, validações, conflitos e CSV seguro. O teste de navegador da sessão usa Chromium/IndexedDB para validar seed automático, ações por menu, edição, seleção, paginação, download e persistência. A carga é feita em cada navegador novo, não na memória do servidor Next.js.

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getDatabase, seedDemo, startSync } from './database';
 import { type Filters, type Row, type Sort } from './model';
 import { ensureIndexes, fetchPage, type LocalDB } from './query';
+import { migrateOrderWorkflow } from './workflow-migration';
 type QueryState = { filters: Filters; sort: Sort; cursors: (string | null)[]; revision: number };
 export function useBlotter() {
   const dbRef = useRef<LocalDB | null>(null);
@@ -44,6 +45,8 @@ export function useBlotter() {
         });
         changes.on('error', () => { if (!cancelled) setError('Falha no feed local de alterações'); });
         await ensureIndexes(db);
+        if (cancelled) return;
+        await migrateOrderWorkflow(db);
         if (cancelled) return;
         setSeeding(true);
         await seedDemo(db, 5000, count => { if (!cancelled) setSeedCount(count); });

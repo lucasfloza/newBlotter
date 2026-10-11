@@ -40,8 +40,8 @@ export const OrderRow = styled.tr<{ $selected: boolean }>`
 `;
 export const Badge = styled.span<{ $value?: string }>`
   display: inline-block; padding: 4px 8px; border-radius: 5px; font-size: 11px; font-weight: bold;
-  background: ${p => ['Aceita', 'Executada', 'Compra'].includes(p.$value ?? '') ? '#10382f' : ['Rejeitada', 'Cancelada', 'Venda'].includes(p.$value ?? '') ? '#3e202c' : '#233147'};
-  color: ${p => ['Aceita', 'Executada', 'Compra'].includes(p.$value ?? '') ? '#6ee7b7' : ['Rejeitada', 'Cancelada', 'Venda'].includes(p.$value ?? '') ? '#fda4af' : '#a5c7f5'};
+  background: ${p => ['Nova', 'Executada', 'Compra'].includes(p.$value ?? '') ? '#10382f' : ['Rejeitada', 'Cancelada', 'Venda'].includes(p.$value ?? '') ? '#3e202c' : '#233147'};
+  color: ${p => ['Nova', 'Executada', 'Compra'].includes(p.$value ?? '') ? '#6ee7b7' : ['Rejeitada', 'Cancelada', 'Venda'].includes(p.$value ?? '') ? '#fda4af' : '#a5c7f5'};
 `;
 export const Footer = styled.footer`display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-top:16px; color:#91a4bf; font-size:13px;`;
 export const Message = styled.div<{ $error?: boolean }>`padding: 12px; border-radius: 7px; margin: 12px 0; white-space: pre-wrap; color: ${p => p.$error ? '#fecdd3' : '#a7f3d0'}; background: ${p => p.$error ? '#351b27' : '#102c28'};`;

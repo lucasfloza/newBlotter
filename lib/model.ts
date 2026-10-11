@@ -75,6 +75,9 @@ export const terminalStatuses = new Set([
   "Rejeitada",
   "Cancelada",
 ]);
+export const PENDING_ACCEPTANCE = "Pendente aceite";
+export const UNASSIGNED_TRADER = "Sem trader";
+export const WORKFLOW_VERSION = "2";
 export function mockOrder(
   i: number,
   id = `row:order:${String(i).padStart(8, "0")}`,
@@ -82,7 +85,7 @@ export function mockOrder(
   const quantity = ((i % 50) + 1) * 100;
   const price = (12 + (i % 800) / 10).toFixed(2);
   const time = new Date(Date.UTC(2026, 9, 8, 12) + i * 1000).toISOString();
-  return makeRow(id, {
+  const order = makeRow(id, {
     c01: `ORD-${String(i + 1).padStart(6, "0")}`,
     c02: time,
     c03: [
@@ -96,12 +99,12 @@ export function mockOrder(
       "BBAS3",
     ][i % 8],
     c04: i % 2 ? "Venda" : "Compra",
-    c05: "Nova",
+    c05: PENDING_ACCEPTANCE,
     c06: String(quantity),
     c07: price,
     c08: "0",
     c09: "0.00",
-    c10: traders[i % 4],
+    c10: UNASSIGNED_TRADER,
     c11: `Cliente ${String((i % 200) + 1).padStart(3, "0")}`,
     c12: String(10000 + (i % 200)),
     c13: ["Institucional", "Varejo", "Proprietaria"][i % 3],
@@ -113,6 +116,8 @@ export function mockOrder(
     c19: "",
     c20: (quantity * Number(price)).toFixed(2),
   });
+  order.workflowVersion = WORKFLOW_VERSION;
+  return order;
 }
 export function mockRow(i: number) {
   return makeRow(

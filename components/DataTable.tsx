@@ -6,6 +6,8 @@ import { useBlotter } from "@/lib/useBlotter";
 import {
   exportOrders,
   runOrderAction,
+  canOrderAction,
+  selectionActionAvailability,
   type OrderAction,
   type ActionOptions,
   type Selection,
@@ -42,6 +44,8 @@ export default function DataTable() {
     targets: Selection;
   } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [menuActions, setMenuActions] = useState(() => selectionActionAvailability([], []));
+  const [menuLoading, setMenuLoading] = useState(false);
   const [dialog, setDialog] = useState<{
     action: OrderAction;
     targets: Selection;
@@ -79,6 +83,8 @@ export default function DataTable() {
       : [{ id: row._id, rev: row._rev! }];
     if (!selectedRef.current.has(row._id))
       setSelected(new Map([[row._id, row._rev!]]));
+    setMenuLoading(true);
+    setMenuActions(selectionActionAvailability([], []));
     setMenu({
       x: Math.max(8, Math.min(x, window.innerWidth - 248)),
       y: Math.max(8, Math.min(y, window.innerHeight - 350)),
@@ -130,6 +136,7 @@ export default function DataTable() {
           throw new Error(
             "A ordem foi alterada. Selecione novamente antes de agir.",
           );
+        if (!canOrderAction(row, action)) throw new Error("Ação indisponível para o status atual da ordem.");
       }
       setDialog({ action, targets: chosen, row });
     } catch (e) {
@@ -138,6 +145,7 @@ export default function DataTable() {
   }
 
   const onEdit = useCallback((row: Row) => {
+    if (!canOrderAction(row, "edit")) return;
     setDialog({
       action: "edit",
       targets: [{ id: row._id, rev: row._rev! }],
@@ -179,12 +187,9 @@ export default function DataTable() {
       row.c01 = `SIM-${crypto.randomUUID().slice(0, 8)}`;
       row.c02 = row.c18 = new Date().toISOString();
       const { makeRow } = await import("@/lib/model");
-      await dbRef.current!.put(
-        makeRow(
-          row._id,
-          Object.fromEntries(columns.map((c) => [c.id, row[c.id]!])),
-        ),
-      );
+      const order = makeRow(row._id, Object.fromEntries(columns.map((c) => [c.id, row[c.id]!])));
+      order.workflowVersion = row.workflowVersion;
+      await dbRef.current!.put(order);
       setNotice("Nova ordem simulada recebida. O feed atualizará a tabela.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Falha ao criar ordem");
@@ -193,9 +198,34 @@ export default function DataTable() {
     }
   }
 
+  // Consulta somente os IDs selecionados, inclusive quando a seleção atravessa
+  // páginas. Habilita a interseção das ações válidas; revisões antigas bloqueiam.
+  useEffect(() => {
+    if (!menu || !dbRef.current) return;
+    let cancelled = false;
+    setMenuLoading(true);
+    setMenuActions(selectionActionAvailability([], []));
+    void (async () => {
+      const rows: Row[] = [];
+      for (let offset = 0; offset < menu.targets.length; offset += 100) {
+        const response = await dbRef.current!.allDocs({ keys: menu.targets.slice(offset, offset + 100).map(target => target.id), include_docs: true });
+        for (const item of response.rows) {
+          if ('doc' in item && item.doc && !item.value.deleted) rows.push(item.doc);
+        }
+      }
+      if (!cancelled) setMenuActions(selectionActionAvailability(rows, menu.targets));
+    })().catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : "Falha ao validar seleção"); })
+      .finally(() => { if (!cancelled) setMenuLoading(false); });
+    return () => { cancelled = true; };
+  }, [menu, query.revision, dbRef]);
+
+  useEffect(() => {
+    if (!menu || menuLoading) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+  }, [menu, menuLoading, menuActions]);
+
   useEffect(() => {
     if (!menu) return;
-    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
     const close = (e: PointerEvent) => {
       if (!menuRef.current?.contains(e.target as Node)) setMenu(null);
     };
@@ -218,7 +248,7 @@ export default function DataTable() {
           <h1>Blotter de ordens</h1>
           <p>Offline-first · PouchDB + CouchDB · ações e execuções simuladas</p>
         </div>
-        <S.Badge $value="Aceita">{syncStatus}</S.Badge>
+        <S.Badge $value="Nova">{syncStatus}</S.Badge>
       </S.Header>
       <S.Metrics>
         <div>
@@ -428,7 +458,7 @@ export default function DataTable() {
             }
           }}
         >
-          <strong>{menu.targets.length} ordem(ns) selecionada(s)</strong>
+          <strong>{menu.targets.length} ordem(ns) selecionada(s){menuLoading && " · Validando…"}</strong>
           {(
             [
               "accept",
@@ -443,7 +473,7 @@ export default function DataTable() {
               key={action}
               role="menuitem"
               disabled={
-                disabled || (action === "edit" && menu.targets.length !== 1)
+                disabled || menuLoading || !menuActions[action]
               }
               onClick={() => void openAction(action, menu.targets)}
             >

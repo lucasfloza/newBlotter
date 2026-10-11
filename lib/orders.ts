@@ -1,8 +1,27 @@
-import { columns, makeRow, terminalStatuses, traders, type Row } from './model';
+import { columns, makeRow, terminalStatuses, traders, PENDING_ACCEPTANCE, UNASSIGNED_TRADER, WORKFLOW_VERSION, type Row } from './model';
 import type { LocalDB } from './query';
 export type OrderAction = 'accept' | 'reject' | 'assign' | 'execute' | 'cancel' | 'edit';
 export type ActionOptions = { trader?: string; quantity?: number; price?: number; patch?: Record<string, string>; reason?: string };
 export type Selection = { id: string; rev: string }[];
+
+// A mesma política é usada na UI e antes de cada gravação; desabilitar um botão
+// não substitui a validação de uma revisão atualizada por outro usuário.
+export function canOrderAction(row: Row, action: OrderAction): boolean {
+  if (row.kind !== 'row' || terminalStatuses.has(row.c05 ?? '')) return false;
+  if (['accept', 'reject', 'edit'].includes(action)) return row.c05 === PENDING_ACCEPTANCE;
+  if (action === 'assign') return row.c05 === 'Nova';
+  if (action === 'cancel') return ['Nova', 'Parcial'].includes(row.c05 ?? '');
+  return action === 'execute' && ['Nova', 'Parcial'].includes(row.c05 ?? '')
+    && traders.includes(row.c10 ?? '') && row.c10 !== UNASSIGNED_TRADER
+    && Number(row.c06) > Number(row.c08);
+}
+export function selectionActionAvailability(rows: Row[], selection: Selection): Record<OrderAction, boolean> {
+  const byId = new Map(rows.map(row => [row._id, row]));
+  const current = selection.length > 0 && selection.every(target => byId.get(target.id)?._rev === target.rev);
+  return Object.fromEntries((['accept', 'reject', 'assign', 'execute', 'cancel', 'edit'] as OrderAction[]).map(action => [action,
+    current && (action !== 'edit' || selection.length === 1) && selection.every(target => canOrderAction(byId.get(target.id)!, action)),
+  ])) as Record<OrderAction, boolean>;
+}
 
 function positive(value: string | number | undefined, name: string, integer = false) {
   const n = Number(value);
@@ -12,22 +31,24 @@ function positive(value: string | number | undefined, name: string, integer = fa
 export function applyAction(row: Row, action: OrderAction, options: ActionOptions = {}): Row {
   const values = Object.fromEntries(columns.map(c => [c.id, row[c.id] ?? '']));
   if (terminalStatuses.has(values.c05)) throw new Error('Ordem finalizada não pode ser alterada');
+  if (!canOrderAction(row, action)) {
+    if (action === 'execute') throw new Error('Execução exige ordem Nova/Parcial com trader atribuído e saldo disponível');
+    if (action === 'assign') throw new Error('Somente ordens Nova podem ser encaminhadas');
+    if (['accept', 'reject', 'edit'].includes(action)) throw new Error('Aceitar, rejeitar e editar exigem status Pendente aceite');
+    throw new Error('Ação indisponível para o status atual');
+  }
   if (action === 'accept') {
-    if (!['Nova', 'Encaminhada'].includes(values.c05)) throw new Error('Somente ordens novas/encaminhadas podem ser aceitas');
-    values.c05 = 'Aceita';
+    values.c05 = 'Nova'; values.c10 = UNASSIGNED_TRADER;
   } else if (action === 'reject') {
-    if (Number(values.c08) > 0) throw new Error('Ordem com execução deve ser cancelada, não rejeitada');
     if (!options.reason?.trim()) throw new Error('Informe o motivo da rejeição');
     values.c05 = 'Rejeitada'; values.c19 = options.reason.trim();
   } else if (action === 'cancel') {
     values.c05 = 'Cancelada'; // Quantidade já executada é preservada.
     if (options.reason?.trim()) values.c19 = options.reason.trim();
   } else if (action === 'assign') {
-    if (!traders.includes(options.trader ?? '') || options.trader === 'Sem trader') throw new Error('Selecione um trader');
+    if (!traders.includes(options.trader ?? '') || options.trader === UNASSIGNED_TRADER) throw new Error('Selecione um trader');
     values.c10 = options.trader!;
-    if (['Nova', 'Encaminhada'].includes(values.c05)) values.c05 = 'Encaminhada';
   } else if (action === 'execute') {
-    if (!['Aceita', 'Parcial'].includes(values.c05)) throw new Error('Aceite a ordem antes de executar');
     const remaining = Number(values.c06) - Number(values.c08);
     const quantity = positive(options.quantity ?? remaining, 'Quantidade', true);
     const price = positive(options.price ?? values.c07, 'Preço');
@@ -39,14 +60,14 @@ export function applyAction(row: Row, action: OrderAction, options: ActionOption
     values.c08 = String(total); values.c05 = total === Number(values.c06) ? 'Executada' : 'Parcial';
   } else {
     // Edição é restrita aos campos de negócio; estado e fills só mudam via ações.
-    for (const key of ['c03', 'c04', 'c06', 'c07', 'c10', 'c11', 'c19']) {
+    if (options.patch?.c10 !== undefined && options.patch.c10 !== UNASSIGNED_TRADER) throw new Error('Atribua um trader pela ação Encaminhar após aceitar');
+    for (const key of ['c03', 'c04', 'c06', 'c07', 'c11', 'c19']) {
       if (options.patch?.[key] !== undefined) values[key] = options.patch[key];
     }
     const executed = Number(values.c08);
-    if (executed > 0 && ['c03', 'c04', 'c07'].some(k => values[k] !== row[k])) throw new Error('Ativo, lado e preço estão bloqueados após execução parcial');
     if (!/^[A-Z0-9]{3,12}$/.test(values.c03)) throw new Error('Ativo inválido');
     if (!['Compra', 'Venda'].includes(values.c04)) throw new Error('Lado inválido');
-    if (!traders.includes(values.c10)) throw new Error('Trader inválido');
+    values.c10 = UNASSIGNED_TRADER;
     if (!values.c11.trim()) throw new Error('Informe o cliente');
     const quantity = positive(values.c06, 'Quantidade', true);
     if (quantity <= executed) throw new Error('Quantidade deve ser maior que a quantidade já executada');
@@ -59,6 +80,7 @@ export function applyAction(row: Row, action: OrderAction, options: ActionOption
   values.c20 = (Number(values.c06) * Number(values.c07)).toFixed(2);
   const updated = makeRow(row._id, values);
   updated._rev = row._rev;
+  updated.workflowVersion = WORKFLOW_VERSION;
   // Log limitado por documento, sem consulta extra por linha. Produção deve usar
   // auditoria autoritativa no backend; este histórico é demonstrativo e replicável.
   const history = JSON.parse(row.actionHistory ?? '[]') as { action: string; at: string }[];
