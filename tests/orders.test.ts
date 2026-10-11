@@ -1,0 +1,66 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import PouchDB from 'pouchdb';
+import find from 'pouchdb-find';
+import { mockOrder, type Row } from '../lib/model';
+import { seedDemo } from '../lib/database';
+import { ensureIndexes, fetchPage } from '../lib/query';
+import { applyAction, runOrderAction, exportOrders } from '../lib/orders';
+PouchDB.plugin(find);
+test('transições, fills, saldo, preço limite e campos imutáveis após execução', () => {
+  const original = mockOrder(0);
+  assert.throws(() => applyAction(original, 'execute'), /Aceite/);
+  const accepted = applyAction(original, 'accept');
+  const partial = applyAction(accepted, 'execute', {quantity:40, price:11});
+  assert.equal(partial.c05, 'Parcial'); assert.equal(partial.c08, '40');
+  assert.throws(() => applyAction(partial, 'reject', {reason:'teste'}), /execução/);
+  assert.throws(() => applyAction(partial, 'edit', {patch:{c03:'VALE3'}}), /bloqueados/);
+  assert.throws(() => applyAction(partial, 'execute', {quantity:61}), /saldo/);
+  assert.throws(() => applyAction(accepted, 'execute', {price:13}), /limite/);
+  assert.throws(() => applyAction(accepted, 'execute', {price:0.001}), /duas casas/);
+  const edited = applyAction(original, 'edit', {patch:{c06:'1e3'}});
+  assert.equal(edited.c06,'1000');
+  const executed = applyAction(partial, 'execute', {quantity:60, price:12});
+  assert.equal(executed.c05, 'Executada'); assert.equal(executed.c09, '11.60');
+  assert.throws(() => applyAction(executed, 'cancel'), /finalizada/);
+  const cancelled = applyAction(partial, 'cancel'); assert.equal(cancelled.c08, '40');
+  const sell = applyAction(mockOrder(1), 'accept');
+  assert.throws(() => applyAction(sell, 'execute', {price:1}), /limite/);
+});
+test('5.000 ordens persistidas, seed idempotente, ações em lote, conflito e exportação segura', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'orders-test-'));
+  const db = new PouchDB<Row>(path.join(dir, 'db'));
+  try {
+    await ensureIndexes(db);
+    await seedDemo(db);
+    const ids = Array.from({length:5000}, (_,i) => mockOrder(i)._id);
+    const seeded = await db.allDocs({keys: ids});
+    assert.equal(seeded.rows.filter(r => !('error' in r)).length, 5000);
+    const row = await db.get(ids[0]), another = await db.get(ids[1]);
+    const edited = applyAction(row, 'edit', {patch:{c06:'9', c07:'99.00', c19:'=HYPERLINK("evil")'}});
+    await db.put(edited);
+    const fresh = await db.get(row._id);
+    assert.equal(fresh.c20, '891.00');
+    const outcome = await runOrderAction(db, [{id:row._id,rev:row._rev!},{id:another._id,rev:another._rev!}], 'accept');
+    assert.equal(outcome.succeeded, 1); assert.equal(outcome.failures.length, 1);
+    assert.match(outcome.failures[0], /outro usuário/);
+    await seedDemo(db);
+    assert.equal((await db.get(ids[0])).c06, '9');
+    assert.equal((await db.get(ids[1])).c05, 'Aceita');
+    const quantity = await fetchPage(db, {}, {column:'c06',direction:'asc'}, null, 10);
+    assert.equal(quantity.rows[0]._id, ids[0]); // 9 < 100, sem ordenação lexical.
+    const exact = await fetchPage(db, {c06:'9'}, {column:'c06',direction:'asc'}, null);
+    assert.deepEqual(exact.rows.map(r => r._id), [ids[0]]);
+    const csv = await exportOrders(db, [{id:row._id,rev:fresh._rev!}]);
+    assert.ok(csv.startsWith('\ufeff')); assert.ok(csv.includes('"\'=HYPERLINK(""evil"")"'));
+    const accepted = await db.get(ids[1]);
+    const forwarded = await runOrderAction(db, [{id:accepted._id,rev:accepted._rev!}], 'assign', {trader:'Ana Lima'});
+    assert.equal(forwarded.succeeded,1); assert.equal((await db.get(ids[1])).c10,'Ana Lima');
+    const rejected = await db.get(ids[2]);
+    assert.equal((await runOrderAction(db, [{id:rejected._id,rev:rejected._rev!}], 'reject', {reason:'Limite de risco'})).succeeded,1);
+    assert.equal((await db.get(ids[2])).c05,'Rejeitada');
+  } finally { await db.destroy(); await rm(dir,{recursive:true,force:true}); }
+});
